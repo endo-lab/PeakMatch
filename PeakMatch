@@ -1,0 +1,353 @@
+# coding: utf-8
+#!/usr/bin/python
+
+'''
+バージョン情報は VERSION.txt を参照せよ. 
+
+<2018.3.28>
+Python3 でも動くように修正
+
+<2018.2.28の京大滞在におけるアイディア>
+
+擬時刻データ (単一細胞, Single) と
+実時刻データ (バルク, Bulk) を入力とし,
+擬時刻に実時刻を割り当てるためのアルゴリズム.
+
+[データの仕様]
+ - いずれのデータも, 行が時刻に対応, 列が遺伝子に対応
+ - 1行目は列 (遺伝子) ラベル, 1列目は行 (時刻) ラベル
+ - タブ区切り
+
+[入力] Singleファイル, Bulkファイル, T, last, intv, inter [開始列番号, 終了列番号]
+ - 詳細は引数 (arguments) の箇所を参照
+ - [開始列番号, 終了列番号]を省略すれば, すべての遺伝子が考慮される
+
+[出力] 擬時刻通し番号, 擬時刻ラベル, 割り当てられた実時刻, 直前の擬時刻に割り当てられた実時刻との差
+
+[アルゴリズムの概要]
+  1. それぞれの遺伝子について以下を行う
+    - 擬時刻データはそのまま使うのではなく, 移動平均を取る: 半径2, 重み1/2とした. 
+    - 擬時刻データと実時刻データ, それぞれについてピークを計算
+      = 半径大きめの移動平均を取る: 半径50, 重み 10/11 とした.
+      = それぞれの時刻における値について, 当該時刻の移動平均+T\sigma以上ならばピーク領域とみなす: 最初は T=1.0 くらいでよいのではないか? \sigmaは移動平均と実際の値の差の標準偏差
+      = ピーク領域における最大値を, ピークとみなす
+  
+  2. すべての擬時刻と実時刻の対 (p,r) について, 重み w(p,r) を求める
+    - (intv=0の場合) それぞれの遺伝子について, 実時刻ピークがP個, 擬時刻ピークがR個あるならば,
+      重み 1/PR を加算
+    - これをすべての遺伝子について足し合わせる
+    - intv=1 の場合は, 最大値のみならず, インターバルを考慮 (ピーク区間に含まれる点対すべてについて重み加算).  
+
+  3. 2で生成された重み付き完全2部グラフに対し, 交差なし最大重みマッチングを求める.
+     F.Malucelli et al., Efficient labelling algorithms for
+     the maximum noncrossing matching problem, DAM, 1993, 47, 175-179.
+
+  4. マッチングでカバーされた擬時刻点には, そのマッチングでマッチされた実時刻点を割り当てる.
+     あまった擬時刻点は, マッチングでカバーされた擬時刻点の間に存在するが,
+     等間隔で実時刻を割り当てる. 
+
+[注意]
+  - 2つのデータにおける最初の時刻同士はマッチさせる
+  - 最後の時刻同士も同様 (ただしオプションでこの制約を解除できる)
+  - この強制マッチングは, 当該辺に十分大きな重みを与えることで実現している.
+
+[課題]
+  - 重みの与え方. 一律 1/PR でよいのか?
+  - 最後の時刻同士を強制マッチしなかった場合, マッチされた擬時刻のうち,
+    最後のものの後の擬時刻はどう取り扱うべきか?
+'''
+
+import os,sys,re
+import math
+
+EPSILON = 0.000001
+
+### Malucelli et al.'s algorithm ###
+def MWNCM(W): # maximum weighted noncrossing matching
+    n = len(W)
+    m = len(W[0])
+    ### labelling phase ###
+    LN = [0] * m
+    L = [[0]*m for i in range(n)]
+    for i in range(n):
+        # Step 1
+        for j in range(m):
+            if j==0:
+                L[i][j] = W[i][j]
+            else:
+                L[i][j] = W[i][j] + max(LN[:j])
+        # Step 2
+        for j in range(m):
+            LN[j] = max(LN[j], L[i][j])
+    A = []
+    for i in range(n):
+        for j in range(m):
+            A.append((i,j,L[i][j]))
+    A.sort(key=lambda a: -a[2])
+    ### selection phase
+    E = []
+    i_min = n
+    j_min = m
+    for a in A:
+        if a[0]<i_min and a[1]<j_min:
+            i_min = a[0]
+            j_min = a[1]
+            E.append((a[0],a[1],W[a[0]][a[1]]))
+    return E
+
+def getAvg(array):
+    return float(sum(array)) / float(len(array))
+
+def getVar(array):
+    avg = getAvg(array)
+    A = [float(a-avg)*float(a-avg) for a in array]
+    return sum(A)/float(len(A))
+
+def getStdev(array):
+    return math.sqrt(getVar(array))
+
+def getMovAvg(array, rad=2, coef=2):
+    movavg = []
+    n = len(array)
+    for i in range(n):
+        num = 0.0
+        den = 0.0
+        for k in range(-rad,rad+1):
+            if i+k<0 or i+k>=n:
+                continue
+            w = float(pow(coef, abs(k)))
+            num += array[i+k]/w
+            den += 1.0/w
+        movavg.append(num/den)
+    return movavg
+
+def getRatioArray(a, b):
+    if len(a)!=len(b):
+        sys.stderr.write('error: the sizes of a and b should be equivalent.\n')
+        sys.exit(1)
+    array = []
+    for (x,y) in zip(a,b):
+        if y < EPSILON:
+            array.append(-1)
+        else:
+            array.append(float(x)/float(y))
+    return array
+
+def interpolate(x, inter):
+    if inter==0:
+        return x
+    if len(x)==0:
+        sys.stderr.write('error: interpolate is invoked although x=[]\n')
+        sys.exit(1)
+    y = []
+    for i in range(len(x)-1):
+        y.append(x[i])
+        for k in range(1, inter+1):
+            a = ((inter+1-k)*x[i] + k*x[i+1]) / float(inter+1)
+            y.append(a)
+    y.append(x[-1])
+    return y
+
+
+class Interval:
+    def __init__(self, left, right, max, r=0):
+        self.left = left
+        self.right = right
+        self.max = max
+        self.r = r
+
+class Data:
+    def __init__(self, filename, fr=0, to=-1):
+        if not os.path.isfile(filename):
+            sys.stderr.write(filename+' is not found.\n')
+            sys.exit(1)
+        self.rowlabel = []
+        self.collabel = None
+        self.src = []
+        f = open(filename)
+        for (t,row) in enumerate(f):
+            a = re.split('\t', row)
+            if t==0:
+                if to == -1:
+                    self.collabel = a[fr+1:]
+                else:
+                    self.collabel = a[fr+1:to+2]
+                self.cols = len(self.collabel)
+                self.src = [[] for j in range(self.cols)]
+                continue
+            self.rowlabel.append(a[0])
+            if to == -1:
+                v = a[fr+1:]
+            else:
+                v = a[fr+1:to+2]
+            if len(v) != self.cols:
+                sys.stderr.write('error: len(v)='+str(len(v))+', but self.cols='+str(self.cols)+'\n')
+                sys.stderr.write('       in '+filename+', the line '+str(t)+' is illegal.\n')
+                print(v)
+                sys.exit(1)
+            for k in range(len(v)):
+                if v[k] == '':
+                    sys.stderr.write('warning: line '+str(t)+' contains an empty string. It is interpreted as zero.\n')
+                    self.src[k].append(0.0)
+                else:
+                    self.src[k].append(float(v[k]))
+        f.close()
+
+    def getMovAvg(self, rad=2, coef=2):
+        self.val = []
+        for j in range(self.cols):
+            self.val.append(getMovAvg(self.src[j], rad, coef))
+
+    def getIntervals(self, val, rad=50, coef=1.1, theta=1.0):
+        self.I = []
+        for j in range(len(val)):
+            mval = getMovAvg(val[j], rad, coef)
+            diff = [a-b for (a,b) in zip(val[j], mval)]
+            stdev = getStdev(diff)
+            I = []
+            in_flag = False
+            for k in range(len(val[j])):
+                if val[j][k] >= mval[k]+theta*stdev:
+                    if in_flag == False:
+                        interval = Interval(k,k,k)
+                        I.append(interval)
+                        in_flag = True
+                    I[-1].right = k
+                    if val[j][k] > val[j][I[-1].max]:
+                        I[-1].max = k
+                else:
+                    in_flag = False
+            self.I.append(I)
+
+    def interpolate(self, inter):
+        self.val = []
+        for j in range(self.cols):
+            self.val.append(interpolate(self.src[j], inter))
+
+    def _get_rows(self):
+        return len(self.val[0])
+
+    def _set_rows(self):
+        sys.stderr.write('warning: rows is read-only property.\n')
+
+    def _del_rows(self):
+        pass
+
+    rows = property(_get_rows, _set_rows, _del_rows)
+
+
+
+############## main ###############
+
+### arguments ###
+if len(sys.argv)<7:
+    sys.stdout.write('''
+usage: main_v2.py (single)(bulk)(T)(last)(intv)(inter)[(from)(to)]
+
+  single ... tabu-separated file for single cell
+  bulk ... tabu-separated file for bulk
+  T ... threshold for deciding peak; it is ratio. >=1.0 is recommended.
+  last ... whether last times are forcibly matched (1) or not (0)
+  intv ... in the idea of interval, whether left/right are taken into account (1) or not (0; i.e., only max is considered)
+  inter ... number of points that are added between real time points for interpolation (e.g., 7 for 30min) 
+
+''')    
+    sys.exit(1)
+
+if len(sys.argv)>=9:
+    Single = Data(sys.argv[1], fr=int(sys.argv[7]), to=int(sys.argv[8]))
+    Bulk = Data(sys.argv[2], fr=int(sys.argv[7]), to=int(sys.argv[8]))
+else:
+    Single = Data(sys.argv[1])
+    Bulk = Data(sys.argv[2])
+
+T = float(sys.argv[3])
+(Last, Intv, Inter) = map(int, sys.argv[4:7])
+
+
+### check the format ###
+if Single.cols != Bulk.cols:
+    sys.stderr.write('error: the numbers of columns are not equivalent.\n')
+    sys.exit(1)
+
+### take the moving average for single data ###
+Single.getMovAvg()      # by this, Single.val becomes the moving average
+Bulk.interpolate(Inter) # new points are generated by linear interpolation
+
+### compute intervals ###
+Single.getIntervals(Single.val, theta=T) 
+Bulk.getIntervals(Bulk.val, theta=T)
+
+
+#for c in range(Single.cols):
+#    Single.I[c].sort(key=lambda intv: intv.left)
+#    for intv in Single.I[c]:
+#        print '(',intv.left, intv.max, intv.right, intv.r, ')'
+#    print
+#    Bulk.I[c].sort(key=lambda intv: intv.left)
+#    for intv in Bulk.I[c]:
+#        print '(',intv.left, intv.max, intv.right, intv.r, ')'
+#    print
+
+### assign weights to complete bipartite graph K_{n,m} ###
+
+n = Single.rows
+m = Bulk.rows
+
+W = [[0]*m for i in range(n)]
+
+W[0][0] = Bulk.rows+1
+if Last:
+    W[Single.rows-1][Bulk.rows-1] = Bulk.rows+1
+
+if Intv==0:
+    for c in range(Single.cols):
+        comb = len(Single.I[c]) * len(Bulk.I[c])
+        for s_intv in Single.I[c]:
+            i = s_intv.max
+            for b_intv in Bulk.I[c]:
+                j = b_intv.max
+                W[i][j] += 1.0 / float(comb)
+else:
+    for c in range(Single.cols):
+        comb = 0
+        for s_intv in Single.I[c]:
+            for b_intv in Bulk.I[c]:
+                comb += (s_intv.right-s_intv.left+1) * (b_intv.right-b_intv.left+1)
+        for s_intv in Single.I[c]:
+            for b_intv in Bulk.I[c]:
+                for i in range(s_intv.left, s_intv.right+1):
+                    for j in range(b_intv.left, b_intv.right+1):
+                        W[i][j] += 1.0 / float(comb)
+
+
+### compute maximum weighted non-crossing matching ###
+M = MWNCM(W)
+M.sort(key=lambda e: e[0]) # M is ordered w.r.t. pseudo times
+St = [e[0] for e in M]     # St is the set of matched pseudo times
+I = [St[k+1]-St[k] for k in range(len(M)-1)] 
+
+#print M
+#print len(M)
+#print St
+#print I
+
+### output the result ###
+k = -1
+A = []
+for i in range(Single.rows):
+    if i in St:
+        k += 1
+        A.append(M[k][1])
+    else:
+        x = 0
+        if k < len(St)-1:
+            x = float( (i-St[k])*M[k+1][1] + (St[k+1]-i)*M[k][1] ) / float(St[k+1]-St[k])
+        else:
+            x = A[i-1] + EPSILON
+        A.append(x)
+    if i>0:
+        print(i,Single.rowlabel[i],A[i],A[i]-A[i-1])
+    else:
+        print(i,Single.rowlabel[i],A[i])
+
