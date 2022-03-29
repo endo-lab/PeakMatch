@@ -74,6 +74,8 @@ between 0 and the number of bulk nodes minus one.
 • The 4th column indicates the delay; in the above example, because PT5 is estimated
 as 4 and PT6 is estimated as 7.2, the delay shown in the PT6’s row is 7.2 − 4 = 3.2.
 3  
+• The 5th column indicates the bulk node to which a pseudo time is matched. **__NA__**
+indicates that the corresponding pseudo time is not matched to any bulk node.  
 
 See PDF for further details.
 
