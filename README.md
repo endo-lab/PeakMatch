@@ -59,6 +59,23 @@ where the file name can be specified by option **-sum**.
 Besides, the program generates a file named **sample_pred.txt**, which was specified by
 **-pred**, whose contents are as follows.
 
+    0 PT1 0 __NA__ AT1
+    1 PT2 1 1 AT1_1
+    2 PT3 2 1 AT1_2
+    3 PT4 3 1 AT1_3
+    4 PT5 4 1 AT1_4
+    5 PT6 7.2 3.2 __NA__
+    ...
+    
+• The 1st column indicates the index of a pseudo time. The index begins from zero.  
+• The 2nd column indicates the label of the pseudo time.  
+• The 3rd column indicates the estimated actual time, which is normalized to a value
+between 0 and the number of bulk nodes minus one.  
+• The 4th column indicates the delay; in the above example, because PT5 is estimated
+as 4 and PT6 is estimated as 7.2, the delay shown in the PT6’s row is 7.2 − 4 = 3.2.
+3  
+
+See PDF for further details.
 
 # Author
 * HARAGUCHI, Kazuya
